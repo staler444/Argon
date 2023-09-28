@@ -18,6 +18,7 @@ using vr = vector<real_t>;
 #define CONCAT_INNER(a, b) a ## b
 #define _ CONCAT(_, __COUNTER__)
 #define sq(x) ((x)*(x))
+#define def_min(a, b) (a < b ? a : b)
 
 /* pomiary czasu */
 auto __my_time_start = steady_clock::now(), __my_time_stop = steady_clock::now();
@@ -35,8 +36,13 @@ cudaError_t cuda_err;
 #define cudaAssert(status) if((cuda_err = status) != cudaSuccess) { \
     cout << __LINE__ << " " << cudaGetErrorString(cuda_err) << endl; exit(1); }
 
+/* maxymalne zagęszczenie atomów */
+constexpr int max_zageszczenie(real_t r) {
+    return int(24.0*3.14*1.41/15.0 * (r*r*r) / (0.37*0.37*0.37) + 10);
+}
+
 /*===========================================================================*
- *                   	        konfiguracja				     *
+ *                   	        konfiguracja				                 *
  *===========================================================================*/
 
 /* stałe z treści */
@@ -47,7 +53,6 @@ constexpr real_t ts  =  0.001;      /* time stamp w symulcji */
 constexpr real_t B   =  1;          /* siła balonu */
 constexpr real_t mas = 39.95;       /* masa atomu */
 constexpr real_t kB  = 0.00831;     /* stała Boltzmana */
-constexpr int MAX_LI = 320;         /* max dlugosc listy sasiadow, z zapasem */
 
 /* wymiary siatki z atomami */
 constexpr int siat_X = 6;
@@ -58,18 +63,21 @@ constexpr int N = siat_X*siat_Y*siat_Z*4; /*ilość atomów */
 /* wymagana konfiguracja */
 constexpr int DEBUG         = 1;        /* 0-nic, 1-najważniesze, 2-rozszerzone, 3-wszystko */
 constexpr bool VERBOSE      = true;     /* czy wypisywać najważniejsze logi również na stdout */
-constexpr bool STATS        = false;     /* czy obliczac statystyki energi */
+constexpr bool STATS        = false;    /* czy obliczac statystyki energi */
 constexpr int Nterm         = 10000;    /* ilość kroków fazy termalizacji */
-constexpr int Ngrz          = 0;     /* ilość kroków fazy grzania */
-constexpr int Nch           = 0;     /* ilość kroków fazy chłodzenia */
+constexpr int Ngrz          = 5000;     /* ilość kroków fazy grzania */
+constexpr int Nch           = 5000;     /* ilość kroków fazy chłodzenia */
 constexpr int ENERG         = 100;      /* częstotliowść zapisu anergi */
 constexpr int TRAJE         = 100;      /* częstotliwość zapisu współrzędnych */
 constexpr real_t rB         = 20;       /* r balonu w nm */
-constexpr real_t rOd        = 1;        /* promień odcięcia */
+constexpr real_t rOd        = 1.3;      /* promień odcięcia */
 constexpr real_t rBuff      = 0.3;      /* bufor */
 constexpr real_t start_T    = 70;       /* temperatura początkowa */
 constexpr real_t cool_T     = 20;       /* temperatura do której chłodzimy */
 constexpr real_t heat_T     = 120;      /* temperatura do której ogrzewamy */
+
+/* max długość listy sąsiadów */
+constexpr int MAX_LI = def_min(N, max_zageszczenie(rOd + rBuff));
 
 /*===========================================================================*
  *                  		    utility		     		     *
@@ -118,7 +126,7 @@ real_t* F_gpu;          /* siła, gpu */
 real_t* Epot_gpu;       /* energia potencjalna, gpu */
 real_t* cords_gpu;      /* kordynaty, gpu */
 
-/* wersja gpu 3, podzial na atomy w roli hosta i goscia */
+/* wersja gpu 3, podział na atomy w roli hosta i goscia */
 real_t* F_gpu_host;
 real_t* F_gpu_guest;
 real_t* Epot_gpu_host;
@@ -239,11 +247,11 @@ inline void up_temp(int nr) {
 
     /* chłodzenie */
     if (nr >= Nterm and nr < Nterm+Nch) {
-        mno = scale_T(cur_temperatura(), cool_T, Nterm+Nch-nr);
+        mno = scale_T(cur_temperatura(), cool_T, Nch-nr+Nterm);
     }
     /* grzanie */
     else {
-        mno = scale_T(cur_temperatura(), heat_T, Nterm+Ngrz+Nch-nr); 
+        mno = scale_T(cur_temperatura(), heat_T, Ngrz-nr+Nterm+Nch); 
     }
 
     for (int i = 0; i < N; i++)
@@ -360,10 +368,10 @@ void init_atomow() {
 }
 
 /*===========================================================================*
- *                  	aktualizacja sił wersje CPU		     	     *
+ *                  	aktualizacja sił wersje CPU		     	             *
  *===========================================================================*/
 
-inline void clear_forces() {
+inline static void clear_cpu() {
     for (int i = 0; i < N; i++) {
         for (int k = 0; k < 3; k++)
             F[i*3 + k] = 0;
@@ -372,19 +380,20 @@ inline void clear_forces() {
     }
 }
 
-inline void mno_forces() {
+inline static void post_up_cpu() {
     for (int i = 0; i < N; i++) {
         for (int k = 0; k < 3; k++)
             F[i*3 + k] *= 12.0*eps;
+
         Epot[i*2] *= eps/2.0;
         Epot[i*2 + 1] *= eps;
     }
 }
 
 void up_forces_cpu_1() {
-    clear_forces();
+    clear_cpu();
 
-    for (int i = 0; i < N; i++)
+    for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
             if (i == j)
                 continue;
@@ -411,13 +420,14 @@ void up_forces_cpu_1() {
             Epot[i*2] += sig12;
             Epot[i*2 + 1] -= sig6;
         }
+    }
 
-    mno_forces();
+    post_up_cpu();
 }
 
 /* dodajemy opt: 3 zasada newtona */
 void up_forces_cpu_2() {
-    clear_forces();
+    clear_cpu();
 
     for (int i = 0; i < N; i++)
         for (int j = i+1; j < N; j++) {
@@ -449,7 +459,7 @@ void up_forces_cpu_2() {
             Epot[j*2 + 1] -= sig6;
         }
 
-    mno_forces();
+    post_up_cpu();
 }
 
 /* dodajemy opt: listy sąsiedztwa */
@@ -475,7 +485,7 @@ void rebuild_G_cpu() {
     }
 }
 
-void check_G() {
+inline void check_G() {
     static bool first_builded = false;
     if (first_builded == false) {
         rebuild_G_cpu();
@@ -496,7 +506,7 @@ void check_G() {
 
 void up_forces_cpu_3() {
     check_G();
-    clear_forces();
+    clear_cpu();
 
     for (int i = 0; i < N; i++)
         for (int pm = 0, j = G[i][pm]; G[i][pm] != -1; j = G[i][++pm]) {
@@ -528,10 +538,11 @@ void up_forces_cpu_3() {
             Epot[j*2 + 1] -= sig6;
         }
 
-    mno_forces();
+    post_up_cpu();
 }
+
 /*===========================================================================*
- *                  	aktualizacja sił wersje GPU		     	     *
+ *                  	aktualizacja sił wersje GPU		     	             *
  *===========================================================================*/
 
 __global__ void up_forces_gpu_1(real_t* cords_gpu, real_t* F_gpu, real_t* Epot_gpu) {
@@ -544,7 +555,6 @@ __global__ void up_forces_gpu_1(real_t* cords_gpu, real_t* F_gpu, real_t* Epot_g
         F_gpu[i*3 + k] = 0;
     Epot_gpu[i*2] = 0;
     Epot_gpu[i*2 + 1] = 0;
-
 
     for (size_t j = 0; j < N; j++) {
         if (i == j)
@@ -576,7 +586,6 @@ __global__ void up_forces_gpu_1(real_t* cords_gpu, real_t* F_gpu, real_t* Epot_g
 
     for (int k = 0; k < 3; k++)
         F_gpu[i*3 + k] *= 12.0*eps;
-
     Epot_gpu[i*2] *= eps/2.0;
     Epot_gpu[i*2 + 1] *= eps;
 }
@@ -789,6 +798,7 @@ __global__ void rebuild_G_gpu(real_t* cords_gpu, int* G_gpu) {
             G_gpu[x*MAX_LI + pom++] = j;
     }
 
+    assert(pom < MAX_LI);
     G_gpu[x*MAX_LI + pom] = -1;
 }
 
