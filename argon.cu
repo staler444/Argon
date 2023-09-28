@@ -42,7 +42,7 @@ constexpr int max_zageszczenie(real_t r) {
 }
 
 /*===========================================================================*
- *                   	        konfiguracja				                 *
+ *                   	        konfiguracja				     *
  *===========================================================================*/
 
 /* stałe z treści */
@@ -368,7 +368,7 @@ void init_atomow() {
 }
 
 /*===========================================================================*
- *                  	aktualizacja sił wersje CPU		     	             *
+ *                  	aktualizacja sił wersje CPU		     	     *
  *===========================================================================*/
 
 inline static void clear_cpu() {
@@ -542,7 +542,7 @@ void up_forces_cpu_3() {
 }
 
 /*===========================================================================*
- *                  	aktualizacja sił wersje GPU		     	             *
+ *                  	aktualizacja sił wersje GPU		     	     *
  *===========================================================================*/
 
 __global__ void up_forces_gpu_1(real_t* cords_gpu, real_t* F_gpu, real_t* Epot_gpu) {
